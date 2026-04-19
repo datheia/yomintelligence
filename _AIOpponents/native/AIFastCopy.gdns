@@ -1,0 +1,9 @@
+[gd_resource type="NativeScript" load_steps=2 format=2]
+
+[ext_resource path="res://_AIOpponents/native/ai_fast_copy.tres" type="GDNativeLibrary" id=1]
+
+[resource]
+resource_name = "AIFastCopy"
+class_name = "AIFastCopy"
+library = ExtResource( 1 )
+script_class_name = "AIFastCopy"

@@ -1,0 +1,9 @@
+[gd_resource type="GDNativeLibrary" format=2]
+
+[resource]
+entry/Windows.64 = "res://_AIOpponents/native/ai_fast_copy.dll"
+entry/X11.64 = "res://lib/libai_fast_copy.so"
+entry/LinuxBSD.64 = "res://lib/libai_fast_copy.so"
+dependency/Windows.64 = [  ]
+dependency/X11.64 = [  ]
+dependency/LinuxBSD.64 = [  ]
