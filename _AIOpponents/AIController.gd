@@ -14,6 +14,7 @@ var ghost_game = null
 var main = null
 var ghost_viewport = null
 var game = null
+var search_ui_host = null
 
 var gg_scene = null
 var ghost_match_signature = ""
@@ -42,7 +43,8 @@ var search_profile = {}
 # To check UIElements against to see if they have the same script as the 3 default ones
 var checkable_menu = preload("res://_AIOpponents/AICheckableUIData.tscn").instance()
 
-var difficulty = 1
+var configured_search_depth = 2
+var read_strength = 55.0
 var experimental_speedup = true
 
 export var _c_AI_variables = 0
@@ -51,11 +53,14 @@ export var _c_AI_variables = 0
 export var FRAMES_TO_SIMULATE = 35
 # Search depth - how many decision plies to think ahead.
 export var SEARCH_DEPTH = 2
-export var REAL_SEARCH_DEPTH_CAP = 2
-export(float, 0.2, 0.6) var PRUNE_PERCENT = 0.8
-export var ROOT_BRANCH_CAP = 6
-export var OPPONENT_BRANCH_CAP = 5
-export var FOLLOWUP_BRANCH_CAP = 5
+export var REAL_SEARCH_DEPTH_CAP = 3
+export(float, 0.2, 0.6) var PRUNE_PERCENT = 0.8 # Higher keeps more candidate moves during search; lower prunes harder and makes choices narrower/faster.
+export var ROOT_BRANCH_CAP = 7 # Max number of our candidate moves explored at the root decision.
+export var OPPONENT_BRANCH_CAP = 4 # Max number of opponent reply moves considered for each of our root moves.
+export var FOLLOWUP_BRANCH_CAP = 5 # Max number of our non-root followup moves explored in deeper search plies.
+export(float, 0.0, 1.0) var WORST_REPLY_WEIGHT = 0.2 # Safety floor when the opponent read is confident: higher = less exploitative, lower = more willing to hard-read.
+export(float, 0.0, 1.0) var UNCERTAIN_REPLY_WEIGHT = 0.25 # Safety floor when the opponent read is uncertain: higher = more anti-exploit/defensive under ambiguity.
+export var OPPONENT_REPLY_TEMPERATURE = 300.0 # Softmax temperature for opponent reply prediction: lower = sharper/more committed read, higher = flatter/more cautious read.
 export var SEARCH_PROFILE_LOGGING = true
 export var SEARCH_TREE_EXPORT_ENABLED = false
 export var SEARCH_TREE_PRINT_JSON = false
@@ -64,62 +69,24 @@ export var SEARCH_TREE_OUTPUT_PATH = "user://ai_search_tree_latest.json"
 export var states_to_ignore = ["Taunt"] 
 # Stop eval immediately if a move causes hp to drop below 0
 export var prevent_self_destruction = true 
-# Amount to multiply the super level of a move by at evaluation. 
-export var SUPER_MODIFIER = -0.5
-# Amount to multiply the distance a move closes by at evaluation
-export var DISTANCE_MODIFIER = 0.1
 # Amount to multiply the damage a move does by at evaluation
-export var DAMAGE_MODIFIER = 1
-# Amount to penalize damage taken (heavily penalize getting hit)
-export var DAMAGE_TAKEN_PENALTY = 100
+export var DAMAGE_MODIFIER = 24
+# Amount to penalize damage taken.
+export var DAMAGE_TAKEN_PENALTY = 150
 # Amount by which to multiply the frame advantage a move causes at evaluation
-export var FRAME_ADVANTAGE_MODIFIER = 20
-# Reward actual blocked pressure so safe/meaty attacks are not treated like whiffs.
-export var BLOCK_PRESSURE_REWARD = 650
-export var BLOCK_ADVANTAGE_REWARD = 120
-export var BLOCKSTUN_FRAME_REWARD = 25
-export var SAFE_BLOCK_ADVANTAGE_FLOOR = -1
-export var RESOURCE_BURST_UNAVAILABLE_PENALTY = 500
-export var RESOURCE_AIR_MOVEMENT_PENALTY = 300
-export var RESOURCE_SUPER_UNAVAILABLE_PENALTY = 100
+export var FRAME_ADVANTAGE_MODIFIER = 25
 
-# Combo scoring - penalize being combo'd, reward having combo
-export var COMBOED_PENALTY = 8000
-export var COMBOED_COUNT_PENALTY = 800
-export var HURT_STATE_PENALTY = 2500
-export var VULNERABLE_FRAME_PENALTY = 60
-export var COMBO_REWARD = 3000
-export var COMBO_COUNT_REWARD = 400
-export var COMMITMENT_FRAME_PENALTY = 20
-export var THREATENED_COMMITMENT_PENALTY = 900
+# Combo/hurt catastrophe scoring - large swing when either side is already in a decisive hurt/combo state.
+export var COMBOED_PENALTY = 10000
+export var COMBOED_COUNT_PENALTY = 1000
+export var HURT_STATE_PENALTY = 3000
+export var VULNERABLE_FRAME_PENALTY = 80
+export var COMBO_REWARD = 4500
+export var COMBO_COUNT_REWARD = 450
 
 enum LogLevel { ERROR, WARN, INFO, DEBUG, TRACE }
 export(int) var log_level = LogLevel.INFO
 
-# Modifiers for the eval of specific moves. 
-# Key is the name of a state, value is a dictionary of operation and amount.
-# Use either + or * operators with the given amount. 
-# This modifier is the last applied thing to a move eval.
-# Place the operation inside a key of "positive" or "negative" to have it only
-# fire when the eval is already positive or negative.
-var state_specific_modifiers = {
-											"WhiffInstantCancel": {"operation": "*", "amount":0},
-											"InstantCancel": {"operation": "*", "amount":0},
-											"Roll": {"operation": "*", "amount":0.5},
-											"Burst": {
-												"positive":{"operation":"*", "amount":0}, 
-												"negative":{"operation":"+", "amount":-999999} 
-												},
-										"DefensiveBurst": {
-											"positive":{"operation":"*", "amount":0}, 
-											"negative":{"operation":"+", "amount":-999999} 
-											},
-										"OffensiveBurst": {
-											"positive":{"operation":"*", "amount":0}, 
-											"negative":{"operation":"+", "amount":-999999} 
-											},
-										}
-										
 var quick_data_lookup = {
 	"SuperJump":["homing"],
 	"Grab":{"Dash":[true, false], "Direction":[{"x":1, "y":0}, {"x":-1, "y":0}], "Jump":[false]},
@@ -130,51 +97,67 @@ var quick_data_lookup = {
 		{"x":0, "y":-69}, {"x":-60, "y":-35}, {"x":60, "y":-35}], #Short hops
 }
 
+var hidden_ai_actions = {
+	"InstantCancel": true,
+	"WhiffInstantCancel": true,
+}
+
+class SearchActionButtonsStub:
+	var current_button = null
+	var opponent_action_buttons = null
+
 
 var multihustle = false
 
 
 func _ready():
-	
 	game = get_parent()
-
-	if game.is_ghost:
-		#game.disconnect("player_actionable", self, "_start_decision_thread")
+	if game != null and game.is_ghost:
 		self.queue_free()
-	else:
-		if main == null:
-			main = find_parent("Main")
-		if !multihustle and main.has_method("MultiHustle_AddData"):
-			print("AI: Multihustle detected!")
-			multihustle = true
+		return
 
-		# Set difficulty
-		var ModOptions = main.get_node("ModOptions")
-		if ModOptions != null and ModOptions.has_method("get_setting"):
-			var difficulty_int = ModOptions.get_setting("_AIOptions", "difficulty")
-			difficulty = difficulty_int + 1
-			id = ModOptions.get_setting("_AIOptions", "target_player")
-			ai_vs_ai = id == 3
-			experimental_speedup = ModOptions.get_setting("_AIOptions", "experimental_speedup")
-		elif ModOptions != null:
-			if ModOptions.has("settings"):
-				var ai_settings = ModOptions.settings.get("_AIOptions", {})
-				difficulty = int(ai_settings.get("difficulty", 0)) + 1
-				id = int(ai_settings.get("target_player", 2))
-				ai_vs_ai = id == 3
-				experimental_speedup = bool(ai_settings.get("experimental_speedup", true))
-			else:
-				id = 2
+	search_ui_host = Control.new()
+	search_ui_host.name = "AISearchUIHost"
+	search_ui_host.visible = false
+	search_ui_host.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(search_ui_host)
+
+	if main == null:
+		main = find_parent("Main")
+	if !multihustle and main.has_method("MultiHustle_AddData"):
+		print("AI: Multihustle detected!")
+		multihustle = true
+
+	# Load AI options
+	var ModOptions = main.get_node("ModOptions")
+	if ModOptions != null and ModOptions.has_method("get_setting"):
+		id = _normalize_target_player_setting(int(ModOptions.get_setting("_AIOptions", "target_player")))
+		configured_search_depth = int(ModOptions.get_setting("_AIOptions", "search_depth"))
+		read_strength = float(ModOptions.get_setting("_AIOptions", "read_strength"))
+		ai_vs_ai = false
+		experimental_speedup = ModOptions.get_setting("_AIOptions", "experimental_speedup")
+	elif ModOptions != null:
+		if ModOptions.has("settings"):
+			var ai_settings = ModOptions.settings.get("_AIOptions", {})
+			id = _normalize_target_player_setting(int(ai_settings.get("target_player", 2)))
+			configured_search_depth = int(ai_settings.get("search_depth", configured_search_depth))
+			read_strength = float(ai_settings.get("read_strength", read_strength))
+			ai_vs_ai = false
+			experimental_speedup = bool(ai_settings.get("experimental_speedup", true))
 		else:
 			id = 2
-		apply_saved_ai_options()
-		if Network.multiplayer_active:
-			id = 0
-			ai_vs_ai = false
-			difficulty = 1
-		print("AI: Options loaded. target=" + str(id) + ", difficulty=" + str(difficulty))
-		
-		game.connect("player_actionable", self, "_start_decision_thread")
+	else:
+		id = 2
+	apply_saved_ai_options()
+	id = _normalize_target_player_setting(id)
+	ai_vs_ai = false
+	apply_read_strength()
+	if Network.multiplayer_active:
+		id = 0
+		ai_vs_ai = false
+	print("AI: Options loaded. target=" + str(id) + ", depth=" + str(configured_search_depth) + ", reads=" + str(int(round(read_strength))))
+	
+	game.connect("player_actionable", self, "_start_decision_thread")
 
 
 func _exit_tree():
@@ -264,13 +247,43 @@ func apply_saved_ai_options():
 	file.close()
 	if !(saved_settings is Dictionary):
 		return
-	if saved_settings.has("difficulty"):
-		difficulty = int(saved_settings.get("difficulty")) + 1
 	if saved_settings.has("target_player"):
-		id = int(saved_settings.get("target_player"))
-		ai_vs_ai = id == 3
+		id = _normalize_target_player_setting(int(saved_settings.get("target_player")))
+		ai_vs_ai = false
+	if saved_settings.has("search_depth"):
+		configured_search_depth = int(saved_settings.get("search_depth"))
+	elif saved_settings.has("difficulty"):
+		configured_search_depth = _legacy_difficulty_to_depth(int(saved_settings.get("difficulty")))
+	if saved_settings.has("read_strength"):
+		read_strength = float(saved_settings.get("read_strength"))
 	if saved_settings.has("experimental_speedup"):
 		experimental_speedup = bool(saved_settings.get("experimental_speedup"))
+
+
+func _normalize_target_player_setting(value:int) -> int:
+	if value < 0 or value > 2:
+		return 0
+	return value
+
+
+func _legacy_difficulty_to_depth(old_difficulty:int) -> int:
+	match old_difficulty + 1:
+		1:
+			return 0
+		2, 3:
+			return 1
+		4, 5:
+			return 2
+		_:
+			return 3
+
+
+func apply_read_strength() -> void:
+	read_strength = clamp(read_strength, 0.0, 100.0)
+	var normalized = read_strength / 100.0
+	WORST_REPLY_WEIGHT = lerp(0.45, 0.08, normalized)
+	UNCERTAIN_REPLY_WEIGHT = lerp(0.85, 0.20, normalized)
+	OPPONENT_REPLY_TEMPERATURE = lerp(1150.0, 180.0, normalized)
 
 
 func _start_decision_thread():
@@ -391,7 +404,8 @@ func make_move(forced_opponent_action=null, forced_opponent_data=null, submit_ch
 			"game_tick": game.get_ticks_left() if game else 0,
 			"p1_hp": game.p1.hp if game else 0,
 			"p2_hp": game.p2.hp if game else 0,
-			"difficulty": difficulty
+			"configured_depth": configured_search_depth,
+			"read_strength": read_strength
 		}
 	}
 	
@@ -403,26 +417,39 @@ func make_move(forced_opponent_action=null, forced_opponent_data=null, submit_ch
 	if tree_output_enabled:
 		search_tree["game_state_snapshot"] = _game_state_snapshot(game)
 	
-	var previous_actionbutton_ids = []
 	if multihustle:
 		var closest_dist = 999999
 		var closest_opponent = target_player.opponent
 		for player in game.players.values():
-			if player != self:
+			if player != target_player:
 				var opponent_dist = sqrt(pow(player.get_pos().x - target_player.get_pos().x, 2) + pow(player.get_pos().y - target_player.get_pos().y, 2))
 				if opponent_dist < closest_dist:
 					closest_opponent = player
 					closest_dist = opponent_dist
 		target_player.opponent = closest_opponent
 		debug_print("AI of ID " + str(id) + " chooses to target player ID " + str(target_player.opponent.id))
-		previous_actionbutton_ids.append(main.find_node("P"+str(2-id%2)+"ActionButtons").GetRealID())
-		previous_actionbutton_ids.append(main.find_node("P"+str(2-(1+id)%2)+"ActionButtons").GetRealID())
 	
 	# Do DI
 	var ai_pos = target_player.get_pos()
 	var opponent_pos = target_player.opponent.get_pos()
 	var di = di_as_percentage_int_vec(Vector2(ai_pos.x - opponent_pos.x, ai_pos.y - opponent_pos.y).normalized())
 	var temp_extra = {"DI":di, "feint":false, "prediction":-1, "reverse":false}
+
+	if !_has_visible_non_continue_actions(target_player, temp_extra):
+		log_info("[NO_UI_ACTIONS] P" + str(id) + " has no visible actions; auto-continuing.")
+		var continue_choice = _continue_move()
+		target_player.queued_action = continue_choice.action
+		target_player.queued_data = continue_choice.data
+		ReplayManager.resimulating = false
+		queued_action = continue_choice.action
+		queued_data = continue_choice.data
+		queued_extra = {"DI":di, "feint":false, "prediction":-1, "reverse":false}
+		if submit_choice:
+			submit_ai_choice(id, {"action":queued_action, "data":queued_data, "extra":queued_extra})
+		if main != null and main.has_method("_start_ghost"):
+			main.call_deferred("_start_ghost")
+		export_search_tree(decision_started_ms, 0, continue_choice)
+		return {"action":queued_action, "data":queued_data, "extra":queued_extra, "eval":0, "feint":false}
 	
 	var search_depth = min(get_adjusted_search_depth(), REAL_SEARCH_DEPTH_CAP)
 	
@@ -437,7 +464,7 @@ func make_move(forced_opponent_action=null, forced_opponent_data=null, submit_ch
 		if tree_output_enabled:
 			search_tree["opponent_prediction"] = {"action": opponent_action, "score": 0}
 	elif target_player.bursts_available > 0 or target_player.opponent.combo_count <= 0:
-		choice = get_best_move(temp_extra, target_player.opponent.id, 0.2, difficulty>=2, true, false, "Continue", null, 0, null)
+		choice = get_best_move(temp_extra, target_player.opponent.id, 0.2, true, false, "Continue", null, 0, null)
 		opponent_action = choice.action
 		opponent_data = choice.data
 		if tree_output_enabled:
@@ -459,7 +486,7 @@ func make_move(forced_opponent_action=null, forced_opponent_data=null, submit_ch
 		choice = real_search_root(temp_extra, id, search_depth, predicted_reply)
 		_profile_add("decision.real_search", profile_search)
 	else:
-		choice = get_best_move(temp_extra, id, 0.01, true, difficulty >= 3, true, opponent_action, opponent_data, 1, null)
+		choice = get_best_move(temp_extra, id, 0.01, true, true, opponent_action, opponent_data, 1, null)
 	if _is_ai_locked_cancel_state(target_player) and choice.action != "Continue":
 		log_warn("[LEGALITY] replacing " + str(choice.action) + " with Continue because P" + str(id) + " is in " + _state_display_name(target_player.current_state()))
 		choice = _continue_move()
@@ -479,10 +506,6 @@ func make_move(forced_opponent_action=null, forced_opponent_data=null, submit_ch
 	target_player.queued_data = choice.data
 	
 	ReplayManager.resimulating = false
-	
-	if multihustle:
-		Network.multihustle_action_button_manager.set_active_buttons(previous_actionbutton_ids[0], 2-id%2==2)
-		Network.multihustle_action_button_manager.set_active_buttons(previous_actionbutton_ids[1], 2-(1+id)%2==2)
 	
 	queued_action = choice.action
 	queued_data = choice.data
@@ -535,17 +558,7 @@ func eval_move(action, data, extra, id, opponent_action="Continue", opponent_dat
 	
 	var evaluee_ready_tick = null
 	var opponent_ready_tick = null
-	var starting_block_advantage = -evaluee.blocked_hitbox_plus_frames + opponent.blocked_hitbox_plus_frames
-	var created_block_pressure = false
-	var best_block_advantage = -999999
-	var best_opponent_blockstun = 0
 	var frames_simulated = 0
-	
-	var evaluee_is_hit = opponent.combo_count > 0
-	var opponent_is_hit = evaluee.combo_count > 0
-	
-	var evaluee_opponent_dist_start = sqrt(pow(opponent.get_pos().x - evaluee.get_pos().x, 2) + pow(opponent.get_pos().y - evaluee.get_pos().y, 2))
-	var evaluee_opponent_dist_end = 0
 	
 	
 	if multihustle: # Makes sure that the evalation plays out as expected in MultiHustle
@@ -556,16 +569,6 @@ func eval_move(action, data, extra, id, opponent_action="Continue", opponent_dat
 		frames_simulated = current_frame
 		search_ghost_simulations += 1
 		ghost_game.simulate_one_tick()
-		
-		var current_block_advantage = -evaluee.blocked_hitbox_plus_frames + opponent.blocked_hitbox_plus_frames
-		var evaluee_state_was_blocked = false
-		if evaluee.current_state() != null and evaluee.current_state().get("was_blocked") != null:
-			evaluee_state_was_blocked = evaluee.current_state().was_blocked
-		var block_advantage_changed = current_block_advantage != starting_block_advantage
-		if evaluee.got_blocked or evaluee_state_was_blocked or (block_advantage_changed and (opponent.blocked_last_hit or opponent.blocked_last_turn)):
-			created_block_pressure = true
-			best_block_advantage = max(best_block_advantage, current_block_advantage)
-			best_opponent_blockstun = max(best_opponent_blockstun, opponent.blockstun_ticks)
 		
 		if evaluee.hp <= 0 and prevent_self_destruction and evaluee_ready_tick == null:
 			return {"eval":-999999, "feint":false}
@@ -578,8 +581,6 @@ func eval_move(action, data, extra, id, opponent_action="Continue", opponent_dat
 			# opponent.current_state().anim_length == opponent.current_state().current_tick + 1 or opponent.current_state().iasa_at == opponent.current_state().current_tick
 			if (opponent.current_state().interruptible_on_opponent_turn or opponent.feinting or ghost_game.negative_on_hit(opponent)) and opponent_ready_tick == null:
 				opponent_ready_tick = current_frame
-				if !evaluee_opponent_dist_end:
-					evaluee_opponent_dist_end = sqrt(pow(opponent.get_pos().x - evaluee.get_pos().x, 2) + pow(opponent.get_pos().y - evaluee.get_pos().y, 2))
 				break
 		var opponent_tick = current_frame + (opponent.hitlag_ticks if not evaluee_ready_tick else 0)
 		if (opponent.state_interruptable or opponent.dummy_interruptable or opponent.state_hit_cancellable) and opponent_ready_tick == null:
@@ -589,14 +590,9 @@ func eval_move(action, data, extra, id, opponent_action="Continue", opponent_dat
 			# evaluee.current_state().anim_length == evaluee.current_state().current_tick + 1 or evaluee.current_state().iasa_at == evaluee.current_state().current_tick
 			if (evaluee.current_state().interruptible_on_opponent_turn or evaluee.feinting or ghost_game.negative_on_hit(evaluee)) and evaluee_ready_tick == null:
 				evaluee_ready_tick = current_frame
-		
-		if !evaluee_opponent_dist_end and (opponent_ready_tick != null or evaluee_ready_tick != null):
-			evaluee_opponent_dist_end = sqrt(pow(opponent.get_pos().x - evaluee.get_pos().x, 2) + pow(opponent.get_pos().y - evaluee.get_pos().y, 2))
 		if opponent_ready_tick != null and evaluee_ready_tick != null:
 			break
 
-	if !evaluee_opponent_dist_end:
-		evaluee_opponent_dist_end = sqrt(pow(opponent.get_pos().x - evaluee.get_pos().x, 2) + pow(opponent.get_pos().y - evaluee.get_pos().y, 2))
 	if evaluee_ready_tick == null:
 		evaluee_ready_tick = FRAMES_TO_SIMULATE
 	if opponent_ready_tick == null:
@@ -610,84 +606,24 @@ func eval_move(action, data, extra, id, opponent_action="Continue", opponent_dat
 		frame_advantage += 8
 	var damage_dealt = opponent_start_hp - opponent.hp
 	var damage_taken = evaluee_start_hp - evaluee.hp
-	var damage = damage_dealt - damage_taken
-	var distance_closed = evaluee_opponent_dist_start - evaluee_opponent_dist_end 
 	
 	
 	var evaluee_state = evaluee.state_machine.get_state(action)
-	var earliest_hitbox = null
-	var supers = null
 	var feint = false
 	if evaluee_state:
 		
 		if evaluee.feints > 0 and evaluee_state.can_feint() and frame_advantage < 0:
 			feint = true
-			if damage > 0:
+			if damage_dealt > damage_taken:
 				frame_advantage = 0
-			
-		
-		earliest_hitbox = evaluee_state.get("earliest_hitbox")
-		supers = evaluee_state.get("super_level_")
-		
-	if earliest_hitbox == null:
-		earliest_hitbox = 0
-	if supers == null:
-		supers = 0
 	
-	#debug_print("Frame Advantage: "+str(frame_advantage) + ", Damage: " + str(damage) + ", Distance closed: "+str(distance_closed) + ", Earliest Hitbox: " +str(earliest_hitbox) + ", Distance end: " + str(evaluee_opponent_dist_end))
-	
-	
-	var frame_advantage_modifier = FRAME_ADVANTAGE_MODIFIER
-	if distance_closed < 50:
-		frame_advantage_modifier /= 10
-	
-	var distance_modifier = DISTANCE_MODIFIER
-	if damage_dealt == 0 and damage_taken == 0:
-		distance_modifier *= 10
-	if damage_taken > damage_dealt:
-		distance_modifier *= -1
-	
-	# Damage taken is penalised heavily; damage dealt scored normally
 	var eval = (
-		(frame_advantage * frame_advantage_modifier) +
+		(frame_advantage * FRAME_ADVANTAGE_MODIFIER) +
 		(damage_dealt * DAMAGE_MODIFIER) -
-		(damage_taken * DAMAGE_TAKEN_PENALTY) +
-		(distance_closed * distance_modifier) +
-		(supers * SUPER_MODIFIER)
+		(damage_taken * DAMAGE_TAKEN_PENALTY)
 	)
-	
-	if created_block_pressure:
-		if best_block_advantage == -999999:
-			best_block_advantage = -evaluee.blocked_hitbox_plus_frames + opponent.blocked_hitbox_plus_frames
-		if best_block_advantage >= SAFE_BLOCK_ADVANTAGE_FLOOR:
-			eval += BLOCK_PRESSURE_REWARD
-		eval += best_block_advantage * BLOCK_ADVANTAGE_REWARD
-		eval += min(best_opponent_blockstun, FRAMES_TO_SIMULATE) * BLOCKSTUN_FRAME_REWARD
-		
-	var modifier = state_specific_modifiers.get(action)
-	if modifier:
-		if modifier.has("positive") and eval >= 0:
-			modifier = modifier.positive
-		elif modifier.has("negative") and eval < 0:
-			modifier = modifier.negative
-		
-		if modifier.has("operation") and modifier.has("amount"):
-			if modifier.operation == "*":
-				eval *= modifier.amount
-			elif modifier.operation == "+":
-				eval += modifier.amount
-			else:
-				debug_print("WARNING: operator for eval modifier of " + action + "(" + modifier.operation + ") is invalid. Only '*' and '+' are supported.")
-		else:
-			debug_print("WARNING: state modifier " + str(modifier) + " is missing an operation or amount.")
-	
-	# Trying to avoid weird Whiffs where the opponent is far away
-	if action == "WhiffInstantCancel" and evaluee_opponent_dist_end > 150:
-		eval = -200
 
-	# Add combo state scoring
 	eval += _combo_state_score(evaluee, opponent, evaluee_ready_tick, opponent_ready_tick)
-	eval += resource_penalty(evaluee)
 
 	return {
 		"eval":eval,
@@ -695,9 +631,8 @@ func eval_move(action, data, extra, id, opponent_action="Continue", opponent_dat
 		"frame_advantage":frame_advantage,
 		"damage_dealt":damage_dealt,
 		"damage_taken":damage_taken,
-		"distance_closed":distance_closed,
 		"combo_state":evaluee.combo_count > 0,
-		"was_blocked":created_block_pressure,
+		"was_blocked":false,
 		"was_parried":evaluee.got_parried,
 		"whiff_cancel_used":evaluee.current_state() != null and evaluee.current_state().state_name == "WhiffInstantCancel",
 		"resources_after":_fighter_resources_snapshot(evaluee),
@@ -749,11 +684,6 @@ func _combo_state_score(player, opponent, player_ready_tick, opponent_ready_tick
 		score += COMBO_REWARD + (player.combo_count * COMBO_COUNT_REWARD)
 		if player.get("combo_damage") != null:
 			score += player.combo_damage
-	var commitment_frames = _state_commitment_frames(player)
-	if commitment_frames > 0 and _state_should_penalize_commitment(player):
-		if _state_is_attack_threat(opponent):
-			score -= commitment_frames * COMMITMENT_FRAME_PENALTY
-			score -= THREATENED_COMMITMENT_PENALTY
 	return score
 
 func _is_hurt_state(fighter) -> bool:
@@ -829,24 +759,7 @@ func _state_should_penalize_commitment(fighter) -> bool:
 
 
 func get_adjusted_search_depth() -> int:
-	var search_depth = SEARCH_DEPTH
-	if difficulty == 1:
-		search_depth = max(0, search_depth - 2)
-	elif difficulty == 2:
-		search_depth = max(0, search_depth - 1)
-	elif difficulty == 4:
-		search_depth += 1
-	elif difficulty == 5:
-		search_depth += 2
-	elif difficulty == 6:
-		search_depth += 3
-	elif difficulty == 7:
-		search_depth += 4
-	elif difficulty == 8:
-		search_depth += 5
-	elif difficulty >= 9:
-		search_depth += 6
-	return search_depth
+	return int(max(0, configured_search_depth))
 
 
 func _continue_move() -> Dictionary:
@@ -865,13 +778,26 @@ func _sort_by_order_desc(a, b):
 	return a_score > b_score
 
 
+func _is_cancel_action_name(action_name:String) -> bool:
+	return action_name == "WhiffInstantCancel" or action_name == "InstantCancel" or action_name == "Cancel" or action_name.find("Cancel") != -1
+
+
+func _candidate_style_score(action_name:String, candidate_state, branch_label:String="") -> float:
+	# Style bias intentionally disabled: move choice should come from simulated outcomes only.
+	return 0.0
+
+
 func _move_key(move:Dictionary) -> String:
 	return str(move.action) + "|" + str(move.data)
 
 
+func _same_move(a:Dictionary, b:Dictionary) -> bool:
+	return _move_key(a) == _move_key(b)
+
+
 func _append_unique_move(result:Array, move:Dictionary) -> void:
 	for existing in result:
-		if _move_key(existing) == _move_key(move):
+		if _same_move(existing, move):
 			return
 	result.append(move)
 
@@ -1095,8 +1021,6 @@ func _evaluate_game_state(search_game, my_id:int, rollout:Dictionary = {}) -> fl
 	var opponent_start_hp = search_start_hp[opponent.id] if search_start_hp.has(opponent.id) else opponent.hp
 	var damage_dealt = opponent_start_hp - opponent.hp
 	var damage_taken = player_start_hp - player.hp
-	var distance_now = sqrt(pow(opponent.get_pos().x - player.get_pos().x, 2) + pow(opponent.get_pos().y - player.get_pos().y, 2))
-	var distance_closed = search_start_distance - distance_now
 	var player_ready = FRAMES_TO_SIMULATE
 	var opponent_ready = FRAMES_TO_SIMULATE
 	if rollout.has("ready_ticks"):
@@ -1108,43 +1032,16 @@ func _evaluate_game_state(search_game, my_id:int, rollout:Dictionary = {}) -> fl
 		frame_advantage -= 8
 	elif opponent.busy_interrupt and !player.busy_interrupt:
 		frame_advantage += 8
-	var distance_modifier = DISTANCE_MODIFIER
-	if damage_dealt == 0 and damage_taken == 0:
-		distance_modifier *= 10
-	if damage_taken > damage_dealt:
-		distance_modifier *= -1
 	return (
 		(frame_advantage * FRAME_ADVANTAGE_MODIFIER) +
 		(damage_dealt * DAMAGE_MODIFIER) -
 		(damage_taken * DAMAGE_TAKEN_PENALTY) +
-		(distance_closed * distance_modifier) +
-		_combo_state_score(player, opponent, player_ready, opponent_ready) +
-		resource_penalty(player)
+		_combo_state_score(player, opponent, player_ready, opponent_ready)
 	)
 
 
 func _evaluate_search_state(my_id:int, rollout:Dictionary = {}) -> float:
 	return _evaluate_game_state(ghost_base, my_id, rollout)
-
-
-func resource_penalty(fighter) -> float:
-	if fighter == null:
-		return 0.0
-	var penalty = 0.0
-	var max_burst_meter = fighter.get("MAX_BURST_METER") if fighter.get("MAX_BURST_METER") != null else 1500
-	if fighter.get("bursts_available") != null and fighter.get("burst_meter") != null:
-		if fighter.bursts_available == 0 and fighter.burst_meter < int(max_burst_meter * 0.75):
-			penalty -= RESOURCE_BURST_UNAVAILABLE_PENALTY
-	if fighter.get("air_movements_left") != null and fighter.air_movements_left == 0 and fighter.has_method("is_grounded") and !fighter.is_grounded():
-		penalty -= RESOURCE_AIR_MOVEMENT_PENALTY
-	var total_super = 0
-	if fighter.has_method("get_total_super_meter"):
-		total_super = fighter.get_total_super_meter()
-	elif fighter.get("super_meter") != null:
-		total_super = fighter.super_meter
-	if total_super < 100:
-		penalty -= RESOURCE_SUPER_UNAVAILABLE_PENALTY
-	return penalty
 
 
 func _fighter_resources_snapshot(fighter) -> Dictionary:
@@ -1253,16 +1150,16 @@ func _json_safe(value):
 	return value
 
 
-func _difficulty_name() -> String:
-	match difficulty:
-		1:
-			return "Easy"
-		2:
-			return "Medium"
-		3:
-			return "Hard"
-		_:
-			return "Difficulty " + str(difficulty)
+func _read_strength_name() -> String:
+	if read_strength <= 20:
+		return "Very Safe"
+	if read_strength <= 40:
+		return "Cautious"
+	if read_strength <= 60:
+		return "Balanced"
+	if read_strength <= 80:
+		return "Read Heavy"
+	return "Hard Read"
 
 
 func _count_tree_nodes(node) -> int:
@@ -1296,7 +1193,9 @@ func export_search_tree(decision_started_ms:int, search_depth:int, choice:Dictio
 		"tick": game.get_ticks_left() if game != null and game.has_method("get_ticks_left") else 0,
 		"player_id": id,
 		"decision_ms": decision_ms,
-		"difficulty": _difficulty_name(),
+		"configured_depth": configured_search_depth,
+		"read_strength": read_strength,
+		"read_profile": _read_strength_name(),
 		"search_depth": search_depth,
 		"prune_percent_root": PRUNE_PERCENT,
 		"game_state": _game_state_snapshot(game),
@@ -1357,15 +1256,6 @@ func _is_ignored_action(action_name:String) -> bool:
 	return action_name in states_to_ignore or "StrikeAPose" in action_name or "StrikeA_Pose" in action_name
 
 
-func _state_allowed_by_difficulty(candidate) -> bool:
-	if candidate == null:
-		return true
-	if candidate.get("type") == null:
-		return true
-	var state_type = candidate.get("type")
-	return state_type != 0 and state_type <= difficulty
-
-
 func _state_display_name(state) -> String:
 	if state == null:
 		return ""
@@ -1388,44 +1278,7 @@ func _previous_state_for_fighter(fighter):
 	return null
 
 
-func _is_whiff_cancellable_previous_state(previous_state) -> bool:
-	if previous_state == null:
-		return false
-	if !(previous_state is Object):
-		return false
-	if previous_state.get("has_hitboxes") != null and previous_state.has_hitboxes:
-		if previous_state.get("hit_anything") != null and previous_state.hit_anything:
-			return false
-		if previous_state.get("hit_fighter") != null and previous_state.hit_fighter:
-			return false
-		if previous_state.get("hit_yet") != null and previous_state.hit_yet:
-			return false
-		if previous_state.get("was_blocked") != null and previous_state.was_blocked:
-			return false
-		return true
-	if previous_state.get("type") != null:
-		return previous_state.type in [1, 2, 3]
-	return false
-
-
 func can_use_whiff_cancel(fighter) -> Dictionary:
-	var current = fighter.current_state()
-	var previous = _previous_state_for_fighter(fighter)
-	var source_state = previous
-	if current != null and _state_display_name(current) != "WhiffInstantCancel" and _is_whiff_cancellable_previous_state(current):
-		source_state = current
-	if source_state == null:
-		return {
-			"valid": false,
-			"warning_type": "whiff_cancel_on_first_turn",
-			"reason": "previous_state was null, move rejected"
-		}
-	if !_is_whiff_cancellable_previous_state(source_state):
-		return {
-			"valid": false,
-			"warning_type": "invalid_whiff_cancel_previous_state",
-			"reason": "previous_state was " + _state_display_name(previous) + ", current_state was " + _state_display_name(current) + ", neither was a whiff-cancellable attack"
-		}
 	if fighter.got_parried or fighter.got_blocked:
 		return {
 			"valid": false,
@@ -1462,7 +1315,27 @@ func _record_search_warning(warning_type:String, action_name:String, reason:Stri
 	log_warn(action_name + ": " + reason)
 
 
-func _can_fighter_cancel_to_state(fighter, candidate) -> bool:
+func _search_force_grounded(extra) -> bool:
+	if extra != null and extra is Dictionary and extra.has("input_grounded"):
+		return extra.input_grounded
+	return false
+
+
+func _search_force_aerial(extra) -> bool:
+	if extra != null and extra is Dictionary and extra.has("input_aerial"):
+		return extra.input_aerial
+	return false
+
+
+func _search_update_cancel_category_air_type(categories:Array, force_grounded:bool, force_aerial:bool) -> void:
+	for i in range(categories.size()):
+		if force_grounded:
+			categories[i] = categories[i].replace("Aerial", "Grounded")
+		if force_aerial:
+			categories[i] = categories[i].replace("Grounded", "Aerial")
+
+
+func _can_fighter_cancel_to_state(fighter, candidate, extra=null) -> bool:
 	if candidate != null and candidate.state_name == "WhiffInstantCancel":
 		var validity = can_use_whiff_cancel(fighter)
 		if !validity.valid:
@@ -1471,23 +1344,16 @@ func _can_fighter_cancel_to_state(fighter, candidate) -> bool:
 	var state = fighter.current_state()
 	if state == null:
 		return false
-	var cancel_into = []
-	if !fighter.busy_interrupt:
-		cancel_into = (state.interrupt_into if !fighter.state_hit_cancellable else state.hit_cancel_into).duplicate(true)
-		if fighter.turbo_mode and fighter.opponent.current_state().state_name != "Grabbed":
-			cancel_into.append("Grounded" if fighter.is_grounded() else "Aerial")
-		if fighter.feinting and fighter.should_free_cancel_allow_grounded_and_aerial_states() and fighter.opponent.current_state().busy_interrupt_type != CharacterState.BusyInterrupt.Hurt:
-			cancel_into.append("Grounded")
-			cancel_into.append("Aerial")
-	else:
-		cancel_into = state.busy_interrupt_into.duplicate(true)
+	var cancel_into = _search_cancel_categories(fighter, extra)
+	var force_aerial = _search_force_aerial(extra)
+	var force_grounded = _search_force_grounded(extra)
 	for category in cancel_into:
 		if !fighter.action_cancels.has(category):
 			continue
 		for cancel_state in fighter.action_cancels[category]:
 			if cancel_state.state_name != candidate.state_name:
 				continue
-			if !cancel_state.is_usable_with_grounded_check(false, false) or !cancel_state.allowed_in_stance():
+			if !cancel_state.is_usable_with_grounded_check(force_aerial, force_grounded) or !cancel_state.allowed_in_stance():
 				continue
 			if cancel_state.state_name == state.state_name:
 				if fighter.state_hit_cancellable and !state.self_hit_cancellable and !fighter.turbo_mode:
@@ -1513,7 +1379,7 @@ func _can_fighter_cancel_to_state(fighter, candidate) -> bool:
 	return false
 
 
-func _search_cancel_categories(fighter) -> Array:
+func _search_cancel_categories(fighter, extra=null) -> Array:
 	var state = fighter.current_state()
 	if state == null:
 		return []
@@ -1527,10 +1393,11 @@ func _search_cancel_categories(fighter) -> Array:
 			cancel_into.append("Aerial")
 	else:
 		cancel_into = state.busy_interrupt_into.duplicate(true)
+	_search_update_cancel_category_air_type(cancel_into, _search_force_grounded(extra), _search_force_aerial(extra))
 	return cancel_into
 
 
-func _search_cancel_state_is_legal(fighter, state, cancel_state) -> bool:
+func _search_cancel_state_is_legal(fighter, state, cancel_state, extra=null) -> bool:
 	if cancel_state == null:
 		return false
 	if cancel_state.state_name == "WhiffInstantCancel":
@@ -1538,7 +1405,7 @@ func _search_cancel_state_is_legal(fighter, state, cancel_state) -> bool:
 		if !validity.valid:
 			_record_search_warning(validity.warning_type, "WhiffInstantCancel", validity.reason)
 			return false
-	if !cancel_state.is_usable_with_grounded_check(false, false) or !cancel_state.allowed_in_stance():
+	if !cancel_state.is_usable_with_grounded_check(_search_force_aerial(extra), _search_force_grounded(extra)) or !cancel_state.allowed_in_stance():
 		return false
 	if cancel_state.state_name == state.state_name:
 		if fighter.state_hit_cancellable and !state.self_hit_cancellable and !fighter.turbo_mode:
@@ -1566,13 +1433,13 @@ func _is_state_candidate_for_search(candidate) -> bool:
 		return false
 	if candidate.get("state_name") == null:
 		return false
+	if hidden_ai_actions.has(candidate.state_name):
+		return false
 	if candidate.get("show_in_menu") != null and !candidate.show_in_menu:
 		return false
 	if candidate.get("selectable") != null and !candidate.selectable:
 		return false
 	if _is_ignored_action(candidate.state_name):
-		return false
-	if !_state_allowed_by_difficulty(candidate):
 		return false
 	return true
 
@@ -1601,15 +1468,27 @@ func _append_unique_search_candidate(candidates:Array, candidate:Dictionary) -> 
 	candidates.append(candidate)
 
 
-func get_search_candidates(evaluee) -> Array:
+func _has_visible_non_continue_actions(fighter, extra=null) -> bool:
+	if fighter == null:
+		return false
+	for candidate in get_search_candidates(fighter, extra):
+		if candidate.action_name != "Continue":
+			return true
+	return false
+
+
+func get_search_candidates(evaluee, extra=null) -> Array:
 	var candidates = [{"action_name":"Continue", "state":null}]
 	if evaluee == null or evaluee.state_machine == null:
 		return candidates
 	var state = evaluee.current_state()
 	if state == null:
 		return candidates
-	var cancel_categories = _search_cancel_categories(evaluee)
+	var cancel_categories = _search_cancel_categories(evaluee, extra)
 	var scanned = 0
+	# Mirror the live action UI: only consider states that are currently reachable
+	# through the fighter's active cancel categories. Falling back to states_map lets
+	# the AI discover internal/non-visible states such as hidden cancel actions.
 	for category in cancel_categories:
 		if !evaluee.action_cancels.has(category):
 			continue
@@ -1619,21 +1498,11 @@ func get_search_candidates(evaluee) -> Array:
 				continue
 			if !_candidate_allowed_from_current_ai_state(evaluee, candidate):
 				continue
-			if !_search_cancel_state_is_legal(evaluee, state, candidate):
+			if !_search_cancel_state_is_legal(evaluee, state, candidate, extra):
 				continue
 			_append_unique_search_candidate(candidates, {"action_name":candidate.state_name, "state":candidate})
 	if candidates.size() <= 1:
-		for state_name in evaluee.state_machine.states_map.keys():
-			var candidate = evaluee.state_machine.states_map[state_name]
-			if !_is_state_candidate_for_search(candidate):
-				continue
-			if !_candidate_allowed_from_current_ai_state(evaluee, candidate):
-				continue
-			if !_can_fighter_cancel_to_state(evaluee, candidate):
-				continue
-			_append_unique_search_candidate(candidates, {"action_name":candidate.state_name, "state":candidate})
-	if candidates.size() <= 1:
-		log_warn("[SEARCH_MOVES] p" + str(evaluee.id) + " only has Continue from state=" + _state_display_name(state) + " categories=[" + ", ".join(cancel_categories) + "] action_cancel_scan=" + str(scanned) + " action_cancel_keys=" + str(evaluee.action_cancels.keys()))
+		log_warn("[SEARCH_MOVES] p" + str(evaluee.id) + " only has UI-visible Continue from state=" + _state_display_name(state) + " categories=[" + ", ".join(cancel_categories) + "] action_cancel_scan=" + str(scanned) + " action_cancel_keys=" + str(evaluee.action_cancels.keys()))
 	return candidates
 
 
@@ -1753,25 +1622,25 @@ func _move_order_score(search_game, perspective_id:int, move:Dictionary, rollout
 		replying_to_attack = reply_to_move.get("action", "Continue") != "Continue"
 	
 	if damage_dealt > 0:
-		score += 3000.0 + (damage_dealt * 15.0)
+		score += 1500.0 + (damage_dealt * 10.0)
 	if perspective.combo_count > 0:
-		score += 2500.0 + (perspective.combo_count * 250.0)
+		score += 1600.0 + (perspective.combo_count * 180.0)
 	if _is_hurt_or_grabbed_state(opponent):
-		score += 2000.0
+		score += 1200.0
 	if opponent.blockstun_ticks > 0 or perspective.got_blocked:
-		score += 1000.0 + (min(opponent.blockstun_ticks, FRAMES_TO_SIMULATE) * 50.0)
+		score += 700.0 + (min(opponent.blockstun_ticks, FRAMES_TO_SIMULATE) * 30.0)
 	
 	if replying_to_attack:
 		if damage_taken <= 0:
-			score += 1500.0
+			score += 900.0
 		if frame_advantage >= 0:
-			score += 750.0
+			score += 500.0
 	if damage_taken > 0:
-		score -= 4000.0 + (damage_taken * 80.0)
+		score -= 1800.0 + (damage_taken * 24.0)
 	if _is_hurt_or_grabbed_state(perspective):
-		score -= 3000.0
+		score -= 1600.0
 	
-	score += frame_advantage * 30.0
+	score += frame_advantage * 18.0
 	return score
 
 
@@ -1785,6 +1654,58 @@ func _best_eval_move(moves:Array) -> Dictionary:
 	return best
 
 
+func _move_order_metric(move:Dictionary) -> float:
+	return float(move.order_score if move.has("order_score") else move.eval)
+
+
+func _reply_belief_profile(opponent_moves:Array, reply_scores:Array) -> Dictionary:
+	if reply_scores.empty():
+		return {"belief_score":0.0, "confidence":0.0}
+	if opponent_moves.empty() or opponent_moves.size() != reply_scores.size():
+		var uniform_total = 0.0
+		for score in reply_scores:
+			uniform_total += score
+		return {"belief_score":uniform_total / reply_scores.size(), "confidence":0.0}
+	var max_logit = -999999999.0
+	for move in opponent_moves:
+		max_logit = max(max_logit, _move_order_metric(move))
+	var total_weight = 0.0
+	var weighted_total = 0.0
+	var strongest_weight = 0.0
+	var temperature = max(OPPONENT_REPLY_TEMPERATURE, 1.0)
+	for index in range(opponent_moves.size()):
+		var weight = exp((_move_order_metric(opponent_moves[index]) - max_logit) / temperature)
+		total_weight += weight
+		weighted_total += reply_scores[index] * weight
+		strongest_weight = max(strongest_weight, weight)
+	if total_weight <= 0.0:
+		var fallback_total = 0.0
+		for score in reply_scores:
+			fallback_total += score
+		return {"belief_score":fallback_total / reply_scores.size(), "confidence":0.0}
+	var max_probability = strongest_weight / total_weight
+	var baseline_probability = 1.0 / max(float(opponent_moves.size()), 1.0)
+	var confidence = 0.0
+	if baseline_probability < 1.0:
+		confidence = clamp((max_probability - baseline_probability) / (1.0 - baseline_probability), 0.0, 1.0)
+	return {"belief_score":weighted_total / total_weight, "confidence":confidence}
+
+
+func _find_ranked_move(ranked_moves:Array, target_move:Dictionary):
+	for move in ranked_moves:
+		if _same_move(move, target_move):
+			return move
+	return null
+
+
+func _risk_adjusted_reply_score(opponent_moves:Array, reply_scores:Array, worst_score:float) -> float:
+	if reply_scores.empty():
+		return worst_score
+	var belief = _reply_belief_profile(opponent_moves, reply_scores)
+	var safety_weight = lerp(UNCERTAIN_REPLY_WEIGHT, WORST_REPLY_WEIGHT, belief.confidence)
+	return (worst_score * safety_weight) + (belief.belief_score * (1.0 - safety_weight))
+
+
 func get_search_moves(extra:Dictionary, player_id:int, prune_percent:float=-1.0, reply_to_move=null, branch_cap:int=0, branch_label:String="") -> Dictionary:
 	var profile_total = _profile_now()
 	if prune_percent <= 0.0:
@@ -1792,7 +1713,7 @@ func get_search_moves(extra:Dictionary, player_id:int, prune_percent:float=-1.0,
 	var moves = []
 	var evaluee = ghost_base.get_player(player_id)
 	var profile_candidates = _profile_now()
-	var candidates = get_search_candidates(evaluee)
+	var candidates = get_search_candidates(evaluee, extra)
 	_profile_add("search.candidates", profile_candidates)
 	_profile_count("search.candidates.count", candidates.size())
 	var candidate_names = []
@@ -1806,7 +1727,7 @@ func get_search_moves(extra:Dictionary, player_id:int, prune_percent:float=-1.0,
 		var candidate_state = candidate_info.state
 		var data_ui_scene = candidate_state.data_ui_scene if candidate_state != null else null
 		var profile_data = _profile_now()
-		var temp_data = [null] if action_name == "Continue" else get_option_data(action_name, extra, data_ui_scene, evaluee)
+		var temp_data = [null] if action_name == "Continue" else get_option_data(action_name, extra, data_ui_scene, evaluee, candidate_state)
 		temp_data = _filter_attack_vectors_facing_opponent(action_name, candidate_state, temp_data, evaluee)
 		_profile_add("search.option_data", profile_data)
 		_profile_count("search.option_data.outputs", temp_data.size())
@@ -1823,6 +1744,7 @@ func get_search_moves(extra:Dictionary, player_id:int, prune_percent:float=-1.0,
 			var profile_eval = _profile_now()
 			move.eval = _evaluate_game_state(ghost_eval, player_id, rollout)
 			move.frame_advantage = _frame_advantage_from_rollout(ghost_eval, player_id, rollout)
+			move.style_score = 0.0
 			move.order_score = _move_order_score(ghost_eval, player_id, move, rollout, reply_to_move)
 			move.resources_after = _fighter_resources_snapshot(ghost_eval.get_player(player_id))
 			if _search_tree_output_enabled():
@@ -1874,6 +1796,7 @@ func _attach_ranked_moves_to_tree(parent_node:Dictionary, ranked:Dictionary, nod
 		var entry = {
 			"node_id": node_id,
 			"quick_score": move.eval,
+			"style_score": move.style_score if move.has("style_score") else 0,
 			"order_score": move.order_score if move.has("order_score") else move.eval,
 			"simulated_score": move.eval,
 			"depth_remaining": ply_depth,
@@ -1943,7 +1866,6 @@ func real_search_value(extra:Dictionary, my_id:int, depth:int, root:bool=false, 
 	for our_move in our_moves:
 		var worst_score = 999999999.0
 		var worst_reply = "Continue"
-		var alpha_cutoff = false
 		var profile_restore_for_opp = _profile_now()
 		restore_base(depth)
 		_profile_add("real_search.restore_before_opponent_moves", profile_restore_for_opp)
@@ -1951,19 +1873,21 @@ func real_search_value(extra:Dictionary, my_id:int, depth:int, root:bool=false, 
 		var opponent_ranked = get_search_moves(extra, opponent_id, PRUNE_PERCENT, our_move, OPPONENT_BRANCH_CAP, "opponent")
 		_profile_add("real_search.opponent_moves", profile_opp_moves)
 		if root and predicted_reply is Dictionary:
-			if !predicted_reply.has("eval"):
-				predicted_reply.eval = 0
-			if !predicted_reply.has("order_score"):
-				predicted_reply.order_score = predicted_reply.eval + 2500.0
-			predicted_reply.pruned = false
-			_append_unique_move(opponent_ranked.kept, predicted_reply)
-			_append_unique_move(opponent_ranked.all, predicted_reply)
+			var predicted_ranked_move = _find_ranked_move(opponent_ranked.all, predicted_reply)
+			if predicted_ranked_move == null:
+				predicted_ranked_move = predicted_reply.duplicate(true)
+				predicted_ranked_move.eval = opponent_ranked.threshold if opponent_ranked.has("threshold") else 0
+				predicted_ranked_move.order_score = _move_order_metric(predicted_ranked_move)
+			predicted_ranked_move.pruned = false
+			_append_unique_move(opponent_ranked.kept, predicted_ranked_move)
+			_append_unique_move(opponent_ranked.all, predicted_ranked_move)
 			opponent_ranked.kept.sort_custom(self, "_sort_by_order_desc")
 		if our_move.has("tree_entry"):
 			var profile_attach_opp = _profile_now()
 			_attach_ranked_moves_to_tree(our_move.tree_entry, opponent_ranked, our_move.node_id, ply_depth + 1, true)
 			_profile_add("real_search.attach_opp_tree", profile_attach_opp)
 		var opponent_moves = opponent_ranked.kept
+		var reply_scores = []
 		for opponent_move in opponent_moves:
 			var profile_restore = _profile_now()
 			restore_base(depth)
@@ -1981,26 +1905,21 @@ func real_search_value(extra:Dictionary, my_id:int, depth:int, root:bool=false, 
 				var future = real_search_value(extra, my_id, depth - 1, false, null, child_node, opponent_move.node_id if opponent_move.has("node_id") else node_prefix, ply_depth + 2, best_score, child_beta)
 				_profile_add("real_search.recursive_call", profile_recurse)
 				score = min(score, future.eval)
+			reply_scores.append(score)
 			if score < worst_score:
 				worst_score = score
 				worst_reply = str(opponent_move.action)
 			if opponent_move.has("tree_entry"):
 				opponent_move.tree_entry["simulated_score"] = score
 				opponent_move.tree_entry["game_state_snapshot"] = _game_state_snapshot(ghost_base)
-			if worst_score <= best_score:
-				alpha_cutoff = true
-				_profile_count("real_search.alpha_cutoff")
-				if our_move.has("tree_entry"):
-					our_move.tree_entry["alpha_cutoff"] = true
-					our_move.tree_entry["alpha_cutoff_score"] = worst_score
-					our_move.tree_entry["alpha_cutoff_against"] = best_score
-				break
 		var evaluated_move = our_move.duplicate(true)
-		evaluated_move.eval = worst_score
+		var risk_adjusted_score = _risk_adjusted_reply_score(opponent_moves, reply_scores, worst_score)
+		evaluated_move.eval = risk_adjusted_score
 		evaluated_move.worst_reply = worst_reply
-		evaluated_move.alpha_cutoff = alpha_cutoff
+		evaluated_move.worst_score = worst_score
 		if our_move.has("tree_entry"):
-			our_move.tree_entry["minimax_score"] = worst_score
+			our_move.tree_entry["minimax_score"] = risk_adjusted_score
+			our_move.tree_entry["worst_score"] = worst_score
 			our_move.tree_entry["worst_reply"] = worst_reply
 		if evaluated_move.eval > best_move.eval:
 			best_move = evaluated_move
@@ -2030,7 +1949,7 @@ func real_search_value(extra:Dictionary, my_id:int, depth:int, root:bool=false, 
 
 # Takes a potential data node as input (ActionUIData or XYPlot/Slider etc.)
 # Recursively generates a dictionary of arrays of possible inputs to an ActionUIData.
-func get_data_structure(control_node, fighter=null):
+func get_data_structure(control_node, fighter=null, state=null):
 	# Account for unused code, halves time to process Grab
 	if !control_node.visible and control_node.get_name() == "Jump" and get_children_names(control_node.get_parent()) == ["Direction", "Dash", "Jump"]:
 		return {control_node.get_name():[false]}
@@ -2059,11 +1978,11 @@ func get_data_structure(control_node, fighter=null):
 						return {control_node.get_name():[true, false]}
 
 	if control_node is Container:
-		activate_action_ui_data(control_node, fighter)
+		activate_action_ui_data(control_node, fighter, state)
 		var test_data = {}
 		var datum = null
 		for child in control_node.get_children():
-			datum = get_data_structure(child, fighter)
+			datum = get_data_structure(child, fighter, state)
 			if datum is int:
 				return null
 			elif datum != null and not datum is Array:
@@ -2177,17 +2096,120 @@ func get_children_names(node):
 		children_names.append(child.get_name())
 	return children_names
 
-func get_option_data(option: String, extra: Dictionary, data_ui_scene, fighter) -> Array:
+
+func suppress_search_ui_runtime(node):
+	node.set_block_signals(true)
+	node.set_process(false)
+	node.set_physics_process(false)
+	node.set_process_input(false)
+	node.set_process_unhandled_input(false)
+	node.set_process_unhandled_key_input(false)
+	for child in node.get_children():
+		suppress_search_ui_runtime(child)
+
+
+func _search_facing_sign(fighter) -> int:
+	if fighter != null and fighter.has_method("get_facing_int"):
+		return fighter.get_facing_int()
+	return 1
+
+
+func _search_percent_vec(x:float, y:float, fighter=null) -> Dictionary:
+	return {
+		"x": int(round(x * 100.0)) * _search_facing_sign(fighter),
+		"y": int(round(y * 100.0)),
+	}
+
+
+func _search_slider_values(min_value:=0, max_value:=100) -> Array:
+	return make_unique([
+		{"x": min_value},
+		{"x": max_value},
+		{"x": (min_value + max_value) / 2},
+	])
+
+
+func _search_8way_vec(x:int, y:int, fighter=null) -> Dictionary:
+	return {
+		"x": x * _search_facing_sign(fighter),
+		"y": y,
+	}
+
+
+func _search_xy_cardinals(fighter) -> Array:
+	return [
+		_search_percent_vec(1, 0, fighter),
+		_search_percent_vec(-1, 0, fighter),
+		_search_percent_vec(0, -1, fighter),
+		_search_percent_vec(0, 1, fighter),
+	]
+
+
+func get_special_option_data(option:String, fighter):
+	match option:
+		"Geyser":
+			var max_charge = 1
+			if fighter != null and fighter.get("geyser_charge") != null:
+				max_charge = max(int(fighter.geyser_charge), 1)
+			return {
+				"Charge": {
+					"count": make_unique([1, max_charge, (1 + max_charge) / 2.0])
+				},
+				"Direction": [
+					{"x": -100, "y": 0},
+					{"x": 0, "y": -100},
+					{"x": 0, "y": 100},
+					{"x": 71, "y": -71},
+					{"x": 71, "y": 71},
+				]
+			}
+		"DriveJump":
+			return _search_slider_values()
+		"CommandGrab":
+			return [true, false]
+		"ClapJump":
+			return {
+				"Auto": [true, false],
+				"Direction": [
+					_search_8way_vec(1, 0, fighter),
+					_search_8way_vec(-1, 0, fighter),
+				]
+			}
+		"LOIC":
+			return {
+				"Self": [true, false],
+				"Delay": _search_slider_values(),
+			}
+		"Grenade":
+			var edge_angle = deg2rad(80.0)
+			return [
+				_search_percent_vec(0, -1, fighter),
+				_search_percent_vec(-sin(edge_angle), -cos(edge_angle), fighter),
+				_search_percent_vec(sin(edge_angle), -cos(edge_angle), fighter),
+			]
+		_:
+			return null
+
+func get_option_data(option: String, extra: Dictionary, data_ui_scene, fighter, state=null) -> Array:
 	var temp_data = [null]
 	debug_print("--------------")
 	debug_print("checking " + option)
 	if data_ui_scene != null:
 		var possible_data = []
+		var special_data = get_special_option_data(option, fighter)
 		if option in quick_data_lookup:
 			possible_data = quick_data_lookup[option]
+		elif special_data != null:
+			possible_data = special_data
+			log_info("[SEARCH_UI_FASTPATH] action=" + str(option) + " state=" + _state_display_name(state) + " data=" + str(possible_data))
 		else:
+			log_info("[SEARCH_UI] action=" + str(option) + " state=" + _state_display_name(state) + " scene=" + str(data_ui_scene.resource_path))
 			var data_scene_instance = data_ui_scene.instance()
-			possible_data = get_data_structure(data_scene_instance, fighter) 
+			log_info("[SEARCH_UI_INSTANCE] action=" + str(option) + " root=" + str(data_scene_instance.name) + " children=" + str(get_children_names(data_scene_instance)))
+			possible_data = get_data_structure(data_scene_instance, fighter, state)
+			log_info("[SEARCH_UI_DATA] action=" + str(option) + " data=" + str(possible_data))
+			if data_scene_instance.get_parent() != null:
+				data_scene_instance.get_parent().remove_child(data_scene_instance)
 			data_scene_instance.free()
 		temp_data = split_potential_data(possible_data) if possible_data is Dictionary else possible_data
 		debug_print(temp_data)
@@ -2330,7 +2352,7 @@ func reset_ghost_player_runtime(player, opponent):
 	return
 
 
-func get_best_move(extra:Dictionary, id:int, leeway_percentage:float, allow_leeway:bool, limit_by_difficulty:bool, randomise_burst:bool, opponent_action="Continue", opponent_data=null, tree_depth:int=0, parent_node=null) -> Dictionary:
+func get_best_move(extra:Dictionary, id:int, leeway_percentage:float, allow_leeway:bool, randomise_burst:bool, opponent_action="Continue", opponent_data=null, tree_depth:int=0, parent_node=null) -> Dictionary:
 	var moves = []
 	var best_score = -999999
 	var record_tree = _search_tree_output_enabled() or parent_node != null
@@ -2344,40 +2366,32 @@ func get_best_move(extra:Dictionary, id:int, leeway_percentage:float, allow_leew
 			"chosen": null
 		}
 	
-	if multihustle:
-		Network.multihustle_action_button_manager.set_active_buttons(id, 2-id%2==2)
-	var action_buttons = main.find_node("P"+str(2-id%2)+"ActionButtons")
-	
 	var evaluee = game.get_player(id)
 	var opponent = game.get_player(evaluee.opponent.id) 
 	
 	var dist = sqrt(pow(opponent.get_pos().x - evaluee.get_pos().x, 2) + pow(opponent.get_pos().y - evaluee.get_pos().y, 2))
 	
-	for button in action_buttons.buttons:
-		var action_name = button.action_name
-		var button_state = button.state
-		if action_name != "Continue" and button_state != null and !_candidate_allowed_from_current_ai_state(evaluee, button_state):
-			continue
-		if action_name != "Continue" and button_state != null and !_can_fighter_cancel_to_state(evaluee, button_state):
-			continue
-		var difficulty_ok = !limit_by_difficulty or button_state == null or (button_state.type != 0 and button_state.type <= difficulty)
-		var ignored = action_name in states_to_ignore or "StrikeAPose" in action_name or "StrikeA_Pose" in action_name
+	var candidates = get_search_candidates(evaluee, extra)
+	for candidate_info in candidates:
+		var action_name = candidate_info.action_name
+		var button_state = candidate_info.state
 		var too_far_for_melee = dist > 200 and button_state != null and button_state.type == 1
-		if button.is_visible() and difficulty_ok and !ignored and !too_far_for_melee:
-			var evaluation = evaluate_button(button, extra, id, opponent_action, opponent_data)
-			if record_tree:
-				current_node["evaluations"].append({
-					"action": action_name,
-					"score": evaluation.eval,
-					"data": str(evaluation.data).left(50) if evaluation.data else null
-				})
-			if best_score < evaluation.eval:
-				if !allow_leeway or abs(best_score - evaluation.eval) >= best_score*leeway_percentage:
-					moves = [evaluation]
-				best_score = evaluation.eval
-				
-			elif allow_leeway and abs(best_score - evaluation.eval) <= best_score*leeway_percentage:
-				moves.append(evaluation)
+		if too_far_for_melee:
+			continue
+		var evaluation = evaluate_candidate(action_name, button_state, extra, id, opponent_action, opponent_data)
+		if record_tree:
+			current_node["evaluations"].append({
+				"action": action_name,
+				"score": evaluation.eval,
+				"data": str(evaluation.data).left(50) if evaluation.data else null
+			})
+		if best_score < evaluation.eval:
+			if !allow_leeway or abs(best_score - evaluation.eval) >= best_score*leeway_percentage:
+				moves = [evaluation]
+			best_score = evaluation.eval
+
+		elif allow_leeway and abs(best_score - evaluation.eval) <= best_score*leeway_percentage:
+			moves.append(evaluation)
 
 	# Choose a move that's one of the "best" options to pick
 	debug_print("Options were: " + str(make_options_readable(moves)))
@@ -2411,9 +2425,9 @@ func get_best_move(extra:Dictionary, id:int, leeway_percentage:float, allow_leew
 	return chosen_move
 
 
-func evaluate_button(button, extra, id, opponent_action, opponent_data):
-	var temp_data = get_option_data(button.action_name, extra, button.state.data_ui_scene if button.state != null else null, game.get_player(id))
-	temp_data = _filter_attack_vectors_facing_opponent(button.action_name, button.state, temp_data, game.get_player(id))
+func evaluate_candidate(action_name:String, candidate_state, extra, id, opponent_action, opponent_data):
+	var temp_data = get_option_data(action_name, extra, candidate_state.data_ui_scene if candidate_state != null else null, game.get_player(id), candidate_state)
+	temp_data = _filter_attack_vectors_facing_opponent(action_name, candidate_state, temp_data, game.get_player(id))
 	var best_score = -999999
 	var best_data = null
 	var feint = false
@@ -2424,20 +2438,45 @@ func evaluate_button(button, extra, id, opponent_action, opponent_data):
 			if example_data["Melee Parry Timing"].count == 0:
 				example_data["Melee Parry Timing"].count = 1 #Not possible to block @f0
 		debug_print(example_data)
-		var prediction = eval_move(button.action_name, example_data, extra, id, opponent_action, opponent_data)
+		var prediction = eval_move(action_name, example_data, extra, id, opponent_action, opponent_data)
 		debug_print(prediction.eval)
 		if prediction.eval > best_score:# If the move has the best score, we'll assume they'll pick it
 			best_score = prediction.eval
 			best_data = example_data
 			feint = prediction.feint
-	return {"action":button.action_name, "eval":best_score, "data":best_data, "feint":feint}
+	return {"action":action_name, "eval":best_score, "data":best_data, "feint":feint, "style_score":0.0}
 
 
-func activate_action_ui_data(control_node, fighter):
+func evaluate_button(button, extra, id, opponent_action, opponent_data):
+	return evaluate_candidate(button.action_name, button.state, extra, id, opponent_action, opponent_data)
+
+
+func _make_search_action_buttons_stub():
+	var action_buttons = SearchActionButtonsStub.new()
+	var opponent_action_buttons = SearchActionButtonsStub.new()
+	action_buttons.opponent_action_buttons = opponent_action_buttons
+	return action_buttons
+
+
+func activate_action_ui_data(control_node, fighter, state=null):
 	if control_node is ActionUIData:
+		var script = control_node.get_script()
+		log_info("[SEARCH_UI_ACTIVATE] node=" + str(control_node.name) + " script=" + str(script.resource_path if script != null else "") + " state=" + _state_display_name(state))
+		suppress_search_ui_runtime(control_node)
 		control_node.fighter = fighter
-		self.add_child(control_node)
+		control_node.state = state
+		if control_node.action_buttons == null:
+			control_node.action_buttons = _make_search_action_buttons_stub()
+		if search_ui_host != null and is_instance_valid(search_ui_host):
+			search_ui_host.add_child(control_node)
+		else:
+			self.add_child(control_node)
+		log_info("[SEARCH_UI_INIT] node=" + str(control_node.name) + " state=" + _state_display_name(state))
+		control_node.init()
+		log_info("[SEARCH_UI_INIT_DONE] node=" + str(control_node.name) + " state=" + _state_display_name(state))
+		log_info("[SEARCH_UI_FIGHTER_UPDATE] node=" + str(control_node.name) + " state=" + _state_display_name(state))
 		control_node.fighter_update()
+		log_info("[SEARCH_UI_FIGHTER_UPDATE_DONE] node=" + str(control_node.name) + " state=" + _state_display_name(state))
 
 
 func verify_data_structure(control_node, unverified_data):
