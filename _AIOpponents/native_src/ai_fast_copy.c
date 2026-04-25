@@ -370,22 +370,36 @@ static godot_variant copy_fighter_runtime(
 	return bool_variant(copied >= required ? GODOT_TRUE : GODOT_FALSE);
 }
 
-static godot_bool append_state_name_or_value(godot_array *target_array, godot_variant *source_value) {
+static godot_bool append_valid_state_name(godot_array *target_array, godot_dictionary *target_map, godot_variant *source_value) {
+	godot_variant state_name;
+	godot_bool have_name = GODOT_FALSE;
+
 	if (_gdnative_wrapper_api_struct->godot_variant_get_type(source_value) == GODOT_VARIANT_TYPE_OBJECT) {
 		godot_object *state_object = _gdnative_wrapper_api_struct->godot_variant_as_object(source_value);
 		if (state_object) {
 			godot_bool name_ok = GODOT_FALSE;
-			godot_variant name_value = object_get_property(state_object, "name", &name_ok);
-			if (name_ok) {
-				_gdnative_wrapper_api_struct->godot_array_append(target_array, &name_value);
-				_gdnative_wrapper_api_struct->godot_variant_destroy(&name_value);
-				return GODOT_TRUE;
+			state_name = object_get_property(state_object, "name", &name_ok);
+			if (name_ok && _gdnative_wrapper_api_struct->godot_variant_get_type(&state_name) == GODOT_VARIANT_TYPE_STRING) {
+				have_name = GODOT_TRUE;
+			} else {
+				_gdnative_wrapper_api_struct->godot_variant_destroy(&state_name);
 			}
-			_gdnative_wrapper_api_struct->godot_variant_destroy(&name_value);
 		}
+	} else if (_gdnative_wrapper_api_struct->godot_variant_get_type(source_value) == GODOT_VARIANT_TYPE_STRING) {
+		_gdnative_wrapper_api_struct->godot_variant_new_copy(&state_name, source_value);
+		have_name = GODOT_TRUE;
 	}
-	_gdnative_wrapper_api_struct->godot_array_append(target_array, source_value);
-	return GODOT_TRUE;
+
+	if (!have_name) {
+		return GODOT_FALSE;
+	}
+
+	const godot_bool exists = _gdnative_wrapper_api_struct->godot_dictionary_has(target_map, &state_name);
+	if (exists) {
+		_gdnative_wrapper_api_struct->godot_array_append(target_array, &state_name);
+	}
+	_gdnative_wrapper_api_struct->godot_variant_destroy(&state_name);
+	return exists;
 }
 
 static godot_variant copy_state_history(
@@ -470,14 +484,19 @@ static godot_variant copy_state_history(
 
 	godot_bool queued_ok = GODOT_FALSE;
 	godot_variant source_queued_value = object_get_property(from_sm, "queued_states", &queued_ok);
-	if (queued_ok && _gdnative_wrapper_api_struct->godot_variant_get_type(&source_queued_value) == GODOT_VARIANT_TYPE_ARRAY) {
+	godot_bool target_map_queued_ok = GODOT_FALSE;
+	godot_variant target_map_queued_value = object_get_property(target_sm, "states_map", &target_map_queued_ok);
+	if (queued_ok && target_map_queued_ok &&
+		_gdnative_wrapper_api_struct->godot_variant_get_type(&source_queued_value) == GODOT_VARIANT_TYPE_ARRAY &&
+		_gdnative_wrapper_api_struct->godot_variant_get_type(&target_map_queued_value) == GODOT_VARIANT_TYPE_DICTIONARY) {
 		godot_array source_queued = _gdnative_wrapper_api_struct->godot_variant_as_array(&source_queued_value);
+		godot_dictionary target_queued_map = _gdnative_wrapper_api_struct->godot_variant_as_dictionary(&target_map_queued_value);
 		godot_array target_queued;
 		_gdnative_wrapper_api_struct->godot_array_new(&target_queued);
 		const godot_int queued_size = _gdnative_wrapper_api_struct->godot_array_size(&source_queued);
 		for (godot_int i = 0; i < queued_size; i++) {
 			godot_variant item = _gdnative_wrapper_api_struct->godot_array_get(&source_queued, i);
-			append_state_name_or_value(&target_queued, &item);
+			append_valid_state_name(&target_queued, &target_queued_map, &item);
 			_gdnative_wrapper_api_struct->godot_variant_destroy(&item);
 		}
 		godot_variant target_queued_variant;
@@ -485,16 +504,22 @@ static godot_variant copy_state_history(
 		object_set_property_variant(target_sm, "queued_states", &target_queued_variant);
 		_gdnative_wrapper_api_struct->godot_variant_destroy(&target_queued_variant);
 		_gdnative_wrapper_api_struct->godot_array_destroy(&target_queued);
+		_gdnative_wrapper_api_struct->godot_dictionary_destroy(&target_queued_map);
 		_gdnative_wrapper_api_struct->godot_array_destroy(&source_queued);
 	}
 	_gdnative_wrapper_api_struct->godot_variant_destroy(&source_queued_value);
+	_gdnative_wrapper_api_struct->godot_variant_destroy(&target_map_queued_value);
 
 	godot_bool queued_data_ok = GODOT_FALSE;
 	godot_variant source_queued_data_value = object_get_property(from_sm, "queued_data", &queued_data_ok);
 	if (queued_data_ok && _gdnative_wrapper_api_struct->godot_variant_get_type(&source_queued_data_value) == GODOT_VARIANT_TYPE_ARRAY) {
 		godot_array source_queued_data = _gdnative_wrapper_api_struct->godot_variant_as_array(&source_queued_data_value);
 		godot_array target_queued_data;
-		_gdnative_wrapper_api_struct->godot_array_new_copy(&target_queued_data, &source_queued_data);
+		if (core_1_1) {
+			target_queued_data = core_1_1->godot_array_duplicate(&source_queued_data, GODOT_TRUE);
+		} else {
+			_gdnative_wrapper_api_struct->godot_array_new_copy(&target_queued_data, &source_queued_data);
+		}
 		godot_variant target_queued_data_variant;
 		_gdnative_wrapper_api_struct->godot_variant_new_array(&target_queued_data_variant, &target_queued_data);
 		object_set_property_variant(target_sm, "queued_data", &target_queued_data_variant);

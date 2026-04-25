@@ -54,7 +54,7 @@ export var FRAMES_TO_SIMULATE = 35
 # Search depth - how many decision plies to think ahead.
 export var SEARCH_DEPTH = 2
 export var REAL_SEARCH_DEPTH_CAP = 3
-export(float, 0.2, 0.6) var PRUNE_PERCENT = 0.8 # Higher keeps more candidate moves during search; lower prunes harder and makes choices narrower/faster.
+export(float, 0.2, 0.6) var PRUNE_PERCENT = 0.4 # Higher keeps more candidate moves during search; lower prunes harder and makes choices narrower/faster.
 export var ROOT_BRANCH_CAP = 7 # Max number of our candidate moves explored at the root decision.
 export var OPPONENT_BRANCH_CAP = 4 # Max number of opponent reply moves considered for each of our root moves.
 export var FOLLOWUP_BRANCH_CAP = 5 # Max number of our non-root followup moves explored in deeper search plies.
