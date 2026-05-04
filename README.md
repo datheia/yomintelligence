@@ -24,7 +24,7 @@ hard it reads the opponent.
 - ~~Search debug logging is very loud and can make real game logs huge. Keep
   repro runs short unless you are actively chasing the crash.~~
 
-## Note
+## Special note
 Thanks to [@AxNoodle](https://github.com/AxNoodle) for providing the base that this mod is built on.
 Currently, the `fast_copy_to` function of the mod is **61.7x times faster** than vanilla `copy_to`, allowing for enumeration of big amount of states.
 
