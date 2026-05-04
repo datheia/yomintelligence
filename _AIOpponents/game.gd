@@ -316,14 +316,6 @@ func copy_live_state_data(copy_from:Fighter, copy_target:Fighter):
 
 
 func copy_state_history(copy_from:Fighter, copy_target:Fighter):
-	var native = get_native_fast_copy()
-	if native != null and native.has_method("copy_state_history"):
-		if native.copy_state_history(copy_from, copy_target):
-			return
-		if not native_state_history_warned:
-			native_state_history_warned = true
-			print("[FAST_COPY_NATIVE] state history copy failed; falling back to GDScript")
-
 	copy_target.state_machine.states_stack.clear()
 	for state in copy_from.state_machine.states_stack:
 		if copy_target.state_machine.states_map.has(state.name):

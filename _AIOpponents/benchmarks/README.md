@@ -18,3 +18,15 @@ the benchmark script, so this measures the installed mod build.
 
 It prints the old `copy_to` path against optimized `fast_copy_to`, then prints
 native-helper slices as diagnostics.
+
+Recent local run, 300 iterations / 20 warmup:
+
+- `copy_to` vs `fast_copy_to`: about `21.06x` faster.
+- State variables: native helper was about `1.61x` faster.
+- State history: GDScript was faster, so the mod keeps that path in GDScript.
+- Full GDScript fast-copy vs native-assisted fast-copy: about `1.07x` faster.
+
+The game log gets large quickly while benchmarking. Use low iteration counts
+when checking changes, and clear or rotate `user://logs` if you run this a lot.
+The missing `SoupModOptions` warning from the installed mod can also repeat and
+inflate the log.
