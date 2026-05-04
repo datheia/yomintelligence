@@ -10,13 +10,12 @@ func _init():
 
 func _run():
 	var game_scene = _load_game_scene()
-	var game_script = load(get_script().resource_path.get_base_dir().get_base_dir().plus_file("game.gd"))
-	if game_scene == null or game_script == null:
-		_fail("Could not load the game scene or AI game extension.")
+	if game_scene == null:
+		_fail("Could not load the game scene.")
 		return
 
-	var source = _new_game(game_scene, game_script, false)
-	var target = _new_game(game_scene, game_script, true)
+	var source = _new_game(game_scene, false)
+	var target = _new_game(game_scene, true)
 	if source == null or target == null:
 		_fail("Could not create benchmark games.")
 		return
@@ -33,14 +32,17 @@ func _run():
 
 	var warmup = _arg_int("--warmup", 50)
 	var iterations = _arg_int("--iterations", 1000)
-	var gdscript_usec = _time_copies(source, target, false, warmup, iterations)
-	var native_usec = _time_copies(source, target, true, warmup, iterations)
+	var native = _load_native(source)
 
-	print("[FAST_COPY_BENCH] iterations=", iterations)
-	print("[FAST_COPY_BENCH] gdscript_usec_per_copy=", gdscript_usec)
-	print("[FAST_COPY_BENCH] native_usec_per_copy=", native_usec)
-	if native_usec > 0.0:
-		print("[FAST_COPY_BENCH] speedup=", gdscript_usec / native_usec)
+	print("[FAST_COPY_BENCH] iterations=", iterations, " warmup=", warmup)
+	print("[FAST_COPY_BENCH] native_loaded=", native != null)
+	if native != null:
+		print("[FAST_COPY_BENCH] native_methods copy_properties=", native.has_method("copy_properties"), " copy_state_history=", native.has_method("copy_state_history"))
+
+	_print_timing("copy_to_vs_fast_copy_to", _time_copy_to(source, target, warmup, iterations), _time_full_copy(source, target, true, warmup, iterations))
+	_print_timing("state_variables_p1", _time_state_variables(source, target, false, warmup, iterations), _time_state_variables(source, target, true, warmup, iterations))
+	_print_timing("state_history_p1", _time_state_history(source, target, false, warmup, iterations), _time_state_history(source, target, true, warmup, iterations))
+	_print_timing("fast_copy_gdscript_vs_native", _time_full_copy(source, target, false, warmup, iterations), _time_full_copy(source, target, true, warmup, iterations))
 
 	quit(0)
 
@@ -50,15 +52,19 @@ func _load_game_scene():
 	return load(path) if ResourceLoader.exists(path) else null
 
 
-func _new_game(game_scene, game_script, ghost:bool):
+func _new_game(game_scene, ghost:bool):
 	var game = game_scene.instance()
-	game.set_script(game_script)
+	if not game.has_method("fast_copy_to"):
+		var game_script = load(get_script().resource_path.get_base_dir().get_base_dir().plus_file("game.gd"))
+		if game_script == null:
+			return null
+		game.set_script(game_script)
 	game.is_ghost = ghost
 	root.add_child(game)
 	return game
 
 
-func _time_copies(source, target, use_native:bool, warmup:int, iterations:int) -> float:
+func _time_full_copy(source, target, use_native:bool, warmup:int, iterations:int) -> float:
 	_set_native(source, use_native)
 	for _i in range(max(0, warmup)):
 		source.fast_copy_to(target)
@@ -70,6 +76,46 @@ func _time_copies(source, target, use_native:bool, warmup:int, iterations:int) -
 	return float(OS.get_ticks_usec() - started) / float(count)
 
 
+func _time_copy_to(source, target, warmup:int, iterations:int) -> float:
+	for _i in range(max(0, warmup)):
+		source.copy_to(target)
+
+	var count = max(1, iterations)
+	var started = OS.get_ticks_usec()
+	for _i in range(count):
+		source.copy_to(target)
+	return float(OS.get_ticks_usec() - started) / float(count)
+
+
+func _time_state_variables(source, target, use_native:bool, warmup:int, iterations:int) -> float:
+	_set_native(source, use_native)
+	for _i in range(max(0, warmup)):
+		source.copy_fast_state_variables(source.p1, target.p1)
+
+	var count = max(1, iterations)
+	var started = OS.get_ticks_usec()
+	for _i in range(count):
+		source.copy_fast_state_variables(source.p1, target.p1)
+	return float(OS.get_ticks_usec() - started) / float(count)
+
+
+func _time_state_history(source, target, use_native:bool, warmup:int, iterations:int) -> float:
+	_set_native(source, use_native)
+	for _i in range(max(0, warmup)):
+		source.copy_state_history(source.p1, target.p1)
+
+	var count = max(1, iterations)
+	var started = OS.get_ticks_usec()
+	for _i in range(count):
+		source.copy_state_history(source.p1, target.p1)
+	return float(OS.get_ticks_usec() - started) / float(count)
+
+
+func _load_native(game):
+	_set_native(game, true)
+	return game.get_native_fast_copy()
+
+
 func _set_native(game, enabled:bool) -> void:
 	game.native_fast_copy_warned = false
 	game.native_state_history_warned = false
@@ -79,6 +125,13 @@ func _set_native(game, enabled:bool) -> void:
 	else:
 		game.native_fast_copy_checked = true
 		game.native_fast_copy = null
+
+
+func _print_timing(label:String, gdscript_usec:float, native_usec:float) -> void:
+	print("[FAST_COPY_BENCH] ", label, "_gdscript_usec=", gdscript_usec)
+	print("[FAST_COPY_BENCH] ", label, "_native_usec=", native_usec)
+	if native_usec > 0.0:
+		print("[FAST_COPY_BENCH] ", label, "_speedup=", gdscript_usec / native_usec)
 
 
 func _match_data() -> Dictionary:
