@@ -101,7 +101,23 @@ func get_fast_copy_scene(filename:String):
 
 func reset_hitboxes_for_fast_copy(object):
 	for hitbox in object.hitboxes:
-		hitbox.deactivate()
+		if hitbox.active:
+			hitbox.deactivate()
+
+
+func copy_hitboxes_for_fast_copy(copy_from:Fighter, copy_target:Fighter, current_state) -> void:
+	reset_hitboxes_for_fast_copy(copy_target)
+	if not current_state.has_hitboxes:
+		return
+	var pos = copy_from.get_pos()
+	for i in range(copy_from.hitboxes.size()):
+		copy_target.hitboxes[i].hit_objects = copy_from.hitboxes[i].hit_objects.duplicate()
+		if copy_from.hitboxes[i].active:
+			copy_target.hitboxes[i].activate()
+			copy_target.hitboxes[i].tick = copy_from.hitboxes[i].tick
+			copy_target.hitboxes[i].enabled = copy_from.hitboxes[i].enabled
+			copy_from.hitboxes[i].copy_to(copy_target.hitboxes[i])
+			copy_target.hitboxes[i].update_position(pos.x, pos.y)
 
 
 func copy_transient_objects_for_prediction(game:Game, reusable_objects:Array):
@@ -179,14 +195,17 @@ func fighter_fast_copy(copy_from:Fighter, copy_target:Fighter):
 	copy_target.set_pos(copy_from.get_pos().x, copy_from.get_pos().y)
 	if copy_from.creator_name and copy_target.objs_map.has(copy_from.creator_name):
 		copy_target.creator = copy_target.objs_map[copy_from.creator_name]
-	copy_target.init()
+	if not copy_target.initialized:
+		copy_target.init()
 	copy_target.update_data()
 	copy_fast_state_variables(copy_from, copy_target)
 
 
 	#Initial here takes 0.001s
 
-	copy_target.change_state(current_state.state_name, copy_fast_variant(current_state.data))
+	var changed_state = sync_current_state_for_fast_copy(copy_target, current_state)
+	if changed_state:
+		copy_fast_state_variables(copy_from, copy_target)
 
 	copy_live_state_data(copy_from, copy_target)
 
@@ -207,16 +226,7 @@ func fighter_fast_copy(copy_from:Fighter, copy_target:Fighter):
 	copy_target.update_data()
 	copy_target.sprite.rotation = copy_from.sprite.rotation
 	copy_target.set_facing(copy_from.get_facing_int())
-	var pos = copy_from.get_pos()
-	reset_hitboxes_for_fast_copy(copy_target)
-	for i in range(copy_from.hitboxes.size()):
-		copy_target.hitboxes[i].hit_objects = copy_from.hitboxes[i].hit_objects.duplicate()
-		if copy_from.hitboxes[i].active:
-			copy_target.hitboxes[i].activate()
-			copy_target.hitboxes[i].tick = copy_from.hitboxes[i].tick
-			copy_target.hitboxes[i].enabled = copy_from.hitboxes[i].enabled
-			copy_from.hitboxes[i].copy_to(copy_target.hitboxes[i])
-			copy_target.hitboxes[i].update_position(pos.x, pos.y)
+	copy_hitboxes_for_fast_copy(copy_from, copy_target, current_state)
 	copy_from.hurtbox.copy_to(copy_target.hurtbox)
 	copy_target.projectile_invulnerable = copy_from.projectile_invulnerable
 	copy_target.invulnerable = copy_from.invulnerable
@@ -224,8 +234,7 @@ func fighter_fast_copy(copy_from:Fighter, copy_target:Fighter):
 	copy_from.chara.copy_to(copy_target.chara)
 	copy_target.set_facing(copy_from.get_facing_int())
 
-	for state in copy_target.state_machine.states_map:
-		copy_from.state_machine.states_map[state].copy_hurtbox_states(copy_target.state_machine.states_map[state])
+	copy_live_hurtbox_states(copy_from, copy_target)
 
 
 
@@ -244,12 +253,9 @@ func fighter_fast_copy(copy_from:Fighter, copy_target:Fighter):
 
 
 
-	# BASE FIGHTER COPY
-
 	copy_target.got_parried = copy_from.got_parried
 	copy_target.colliding_with_opponent = copy_from.colliding_with_opponent
 	copy_target.has_hyper_armor = copy_from.has_hyper_armor
-	copy_target.has_projectile_armor = copy_from.has_hyper_armor
 	copy_target.has_projectile_armor = copy_from.has_projectile_armor
 	copy_target.blockstun_ticks = copy_from.blockstun_ticks
 	copy_target.blocked_hitbox_plus_frames = copy_from.blocked_hitbox_plus_frames
@@ -300,19 +306,52 @@ func fighter_fast_copy_character_specific(copy_from:Fighter, copy_target:Fighter
 		copy_target.magnet_polygon2.polygon = copy_from.magnet_polygon2.polygon
 
 
+func sync_current_state_for_fast_copy(copy_target:Fighter, current_state) -> bool:
+	var target_machine = copy_target.state_machine
+	if target_machine.state != null and target_machine.state.name == current_state.state_name:
+		target_machine.queued_states.clear()
+		target_machine.queued_data.clear()
+		target_machine.state.data = copy_fast_variant(current_state.data)
+		return false
+	copy_target.change_state(current_state.state_name, copy_fast_variant(current_state.data))
+	return true
+
+
 func copy_live_state_data(copy_from:Fighter, copy_target:Fighter):
+	var state_names = collect_live_state_names(copy_from)
+
+	for state_name in state_names.keys():
+		if copy_from.state_machine.states_map.has(state_name) and copy_target.state_machine.states_map.has(state_name):
+			copy_live_state(copy_from.state_machine.states_map[state_name], copy_target.state_machine.states_map[state_name])
+
+
+func copy_live_state(source_state, target_state) -> void:
+	if source_state.name == "Wait" and source_state.get_child_count() == 0:
+		target_state.data = copy_fast_variant(source_state.data)
+		target_state.current_real_tick = source_state.current_real_tick
+		target_state.current_tick = source_state.current_real_tick
+		return
+	source_state.copy_to(target_state)
+
+
+func copy_live_hurtbox_states(copy_from:Fighter, copy_target:Fighter):
+	var state_names = collect_live_state_names(copy_from)
+	for state_name in state_names.keys():
+		if copy_from.state_machine.states_map.has(state_name) and copy_target.state_machine.states_map.has(state_name):
+			copy_from.state_machine.states_map[state_name].copy_hurtbox_states(copy_target.state_machine.states_map[state_name])
+
+
+func collect_live_state_names(copy_from:Fighter) -> Dictionary:
 	var state_names = {}
-	if copy_from.current_state():
-		state_names[copy_from.current_state().name] = true
+	var current_state = copy_from.current_state()
+	if current_state:
+		state_names[current_state.name] = true
 	for state in copy_from.state_machine.states_stack:
 		state_names[state.name] = true
 	for queued_state in copy_from.state_machine.queued_states:
 		var state_name = queued_state.name if queued_state is Node else str(queued_state)
 		state_names[state_name] = true
-
-	for state_name in state_names.keys():
-		if copy_from.state_machine.states_map.has(state_name) and copy_target.state_machine.states_map.has(state_name):
-			copy_from.state_machine.states_map[state_name].copy_to(copy_target.state_machine.states_map[state_name])
+	return state_names
 
 
 func copy_state_history(copy_from:Fighter, copy_target:Fighter):

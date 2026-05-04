@@ -21,10 +21,13 @@ native-helper slices as diagnostics.
 
 Recent local run, 300 iterations / 20 warmup:
 
-- `copy_to` vs `fast_copy_to`: about `21.06x` faster.
+- `copy_to` vs `fast_copy_to`: about `50.01x` faster.
 - State variables: native helper was about `1.61x` faster.
 - State history: GDScript was faster, so the mod keeps that path in GDScript.
-- Full GDScript fast-copy vs native-assisted fast-copy: about `1.07x` faster.
+- Full GDScript fast-copy vs native-assisted fast-copy: about `1.17x` faster.
+- The benchmark now prints a lightweight `accuracy_ok` check against the source
+  fighter state plus a few named Ninja state smoke checks. It is still not a
+  proof for every move/action state.
 
 The game log gets large quickly while benchmarking. Use low iteration counts
 when checking changes, and clear or rotate `user://logs` if you run this a lot.

@@ -27,12 +27,16 @@ bt
 ```
 
 The script uses the installed Linux game executable as the Godot runner and
-opens the decompiled project with installed mods loaded. Override paths if your
-layout changes:
+opens the decompiled project. Before launch, it creates a local
+`debug-game-install/` directory with a copied game executable and its own `mods/`
+folder. That matters because the modloader reads mods from the executable's
+directory, not from `--path`. Override paths if your layout changes:
 
 ```bash
 YOMI_GAME_DIR=/path/to/YourOnlyMoveIsHUSTLE \
 YOMI_PROJECT_DIR=/path/to/game-decompiled/hustle \
+YOMI_SOUP_ZIP=/path/to/SoupModOptions_v1.2.zip \
+YOMI_DEBUG_GAME_DIR=/tmp/yomi-debug-game \
 ./scripts/debug-run-game.sh
 ```
 
