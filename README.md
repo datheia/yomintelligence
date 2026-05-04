@@ -24,7 +24,7 @@ hard it reads the opponent.
   repro runs short unless you are actively chasing the crash.
 
 ## Credits
-Thanks to @AxNoodle for providing the base that this mod is built on
+Thanks to [@AxNoodle](https://github.com/AxNoodle) for providing the base that this mod is built on
 
 
 ## Install
