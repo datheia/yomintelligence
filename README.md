@@ -10,6 +10,7 @@ hard it reads the opponent.
 - `_AIOpponents/native_src/`: the GDNative fast-copy helper source.
 - `_AIOpponents/benchmarks/`: checks for fast-copy speed and snapshot accuracy.
 - `CRASH_IDEAS.md`: notes for the crash hunt.
+- `DEBUG_RUNNER.md`: a local runner for crash repros and backtraces.
 
 ## Notes
 
@@ -19,6 +20,8 @@ hard it reads the opponent.
 - Known bug: some move-action states can still crash during search. The current
   suspect is the GDNative probing / fast-copy path around those states, and it
   needs a real fix before this is release-clean.
+- Search debug logging is very loud and can make real game logs huge. Keep
+  repro runs short unless you are actively chasing the crash.
 
 ## Install
 

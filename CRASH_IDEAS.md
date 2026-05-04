@@ -3,6 +3,17 @@
 These are hypotheses for the persistent hard crash during AI move enumeration/search.
 None of these are confirmed. The goal is to preserve the likely causes worth testing later.
 
+## Public Bug
+
+The current release is not crash-clean. Some move-action states can hard-crash
+the game while the AI enumerates legal moves for search. The leading suspect is
+the search-time probing of `ActionUIData` scenes and the surrounding fast-copy /
+GDNative prediction path. Use `DEBUG_RUNNER.md` to reproduce with a focused log
+or a native backtrace.
+
+The AI search logger is intentionally noisy right now and can grow real game
+logs very quickly. Keep repro sessions short until the crash path is isolated.
+
 1. Search-time `ActionUIData` controls are being added to the live scene tree, and one of them triggers recursive notifications or signals until Godot segfaults.
 
 2. A specific custom `ActionUIData` scene assumes real `ActionButtons` state and dereferences it in a way that produces unstable engine behavior when called from the AI search path.
