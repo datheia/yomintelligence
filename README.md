@@ -23,6 +23,10 @@ hard it reads the opponent.
 - Search debug logging is very loud and can make real game logs huge. Keep
   repro runs short unless you are actively chasing the crash.
 
+## Credits
+Thanks to @AxNoodle for providing the base that this mod is built on
+
+
 ## Install
 
 Copy `_AIOpponents` into the game's `mods` directory:
