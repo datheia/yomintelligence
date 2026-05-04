@@ -1,38 +1,29 @@
 # YOMI Hustle AI Opponent
 
-A stronger AI opponent mod for **Your Only Move Is HUSTLE** focused on:
+Tiny robot brain for **Your Only Move Is HUSTLE**. It picks from moves the live
+UI can actually reach, runs a small simulation search, and lets you tune how
+hard it reads the opponent.
 
-- visible-UI-legal move selection
-- opponent reads without turning into pure Stockfish safety spam
-- direct tuning through `Depth` and `Reads`
+## What Is In Here
 
-## Current Behavior
+- `_AIOpponents/`: the mod.
+- `_AIOpponents/native_src/`: the GDNative fast-copy helper source.
+- `_AIOpponents/benchmarks/`: checks for fast-copy speed and snapshot accuracy.
+- `CRASH_IDEAS.md`: notes for the crash hunt.
 
-- The AI only chooses moves that are currently visible/reachable through the live action UI.
+## Notes
+
+- Settings live under `AI Player`, `Depth`, `Reads`, and `Experimental Performance Increase`.
 - If no real move is available, it auto-submits `Continue` and still sets `DI`.
 - AI vs AI mode is disabled.
-
-## Settings
-
-- `AI Player`: `Off`, `Player 1`, or `Player 2`
-- `Depth`: exact search depth
-- `Reads`: how hard the AI leans into opponent prediction
-  - `0` = safest
-  - `100` = most read-heavy
-- `Experimental Performance Increase`: faster ghost-state copying
+- Known bug: some move-action states can still crash during search. The current
+  suspect is the GDNative probing / fast-copy path around those states, and it
+  needs a real fix before this is release-clean.
 
 ## Install
 
-Copy the mod folder into the game's `mods` directory:
+Copy `_AIOpponents` into the game's `mods` directory:
 
 ```bash
 cp -r ai-opponents-fork/_AIOpponents ~/.local/share/Steam/steamapps/common/YourOnlyMoveIsHUSTLE/mods/
 ```
-
-If you are packaging it for release, zip the `_AIOpponents` folder itself.
-
-## Notes
-
-- This repo contains source edits for the mod, not a full game build.
-- The mod targets local play against the AI.
-- The search/eval is intentionally small and simulation-driven rather than full of move-specific hand-authored bias.
