@@ -11,21 +11,22 @@ hard it reads the opponent.
 - `_AIOpponents/benchmarks/`: checks for fast-copy speed and snapshot accuracy.
 - `CRASH_IDEAS.md`: notes for the crash hunt.
 - `DEBUG_RUNNER.md`: a local runner for crash repros and backtraces.
+- `FAST_COPY_LAB.md`: notes for the fast_copy_to speed optimization harness.
 
 ## Notes
 
 - Settings live under `AI Player`, `Depth`, `Reads`, and `Experimental Performance Increase`.
 - If no real move is available, it auto-submits `Continue` and still sets `DI`.
 - AI vs AI mode is disabled.
-- Known bug: some move-action states can still crash during search. The current
+- ~~Known bug: some move-action states can still crash during search. The current
   suspect is the GDNative probing / fast-copy path around those states, and it
-  needs a real fix before this is release-clean.
-- Search debug logging is very loud and can make real game logs huge. Keep
-  repro runs short unless you are actively chasing the crash.
+  needs a real fix before this is release-clean.~~ Might be fixed.
+- ~~Search debug logging is very loud and can make real game logs huge. Keep
+  repro runs short unless you are actively chasing the crash.~~
 
-## Credits
-Thanks to [@AxNoodle](https://github.com/AxNoodle) for providing the base that this mod is built on
-
+## Note
+Thanks to [@AxNoodle](https://github.com/AxNoodle) for providing the base that this mod is built on.
+Currently, the `fast_copy_to` function of the mod is **61.7x times faster** than vanilla `copy_to`, allowing for enumeration of big amount of states.
 
 ## Install
 
